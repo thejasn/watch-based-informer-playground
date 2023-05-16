@@ -208,6 +208,7 @@ func (c *objectCache) AddReference(namespace, name string) {
 		c.items[key] = item
 	}
 	item.refCount++
+	klog.Info("watch based manager add", " ref count ", item.refCount, " item key ", key)
 }
 
 func (c *objectCache) DeleteReference(namespace, name string) {
@@ -217,9 +218,12 @@ func (c *objectCache) DeleteReference(namespace, name string) {
 	defer c.lock.Unlock()
 	if item, ok := c.items[key]; ok {
 		item.refCount--
+		klog.Info("watch based manager delete", " ref count ", item.refCount, " item key ", key)
 		if item.refCount == 0 {
 			// Stop the underlying reflector.
-			item.stop()
+			if item.stop() {
+				klog.Info("watch based manager delete informer stopped ", " ref count ", item.refCount, " item key ", key)
+			}
 			delete(c.items, key)
 		}
 	}

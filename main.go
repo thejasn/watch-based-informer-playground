@@ -215,6 +215,7 @@ func LoadSecretManager(clientset *kubernetes.Clientset, queue workqueue.RateLimi
 			key, _ := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
 
 			klog.Info("Secret deleted ", " obj ", secret.ResourceVersion, " key ", key)
+            queue.Add("sandbox/nginx")
 		},
 	}
 
