@@ -21,6 +21,7 @@ import (
 	"flag"
 	"fmt"
 	"reflect"
+	"thejasn/watch-based-informer-playground/monitor"
 	"time"
 
 	"k8s.io/klog/v2"
@@ -44,15 +45,6 @@ type listObjectFunc func(string, meta_v1.ListOptions) (runtime.Object, error)
 type watchObjectFunc func(string, meta_v1.ListOptions) (watch.Interface, error)
 
 var namespace = "sandbox"
-
-// Controller demonstrates how to implement a controller with client-go.
-type Controller struct {
-	indexer       cache.Indexer
-	store         cache.Store
-	secretManager Manager
-	queue         workqueue.RateLimitingInterface
-	informer      cache.Controller
-}
 
 // NewController creates a new Controller.
 func NewController(queue workqueue.RateLimitingInterface, indexer cache.Indexer, informer cache.Controller, clientset *kubernetes.Clientset, handlerFuncs cache.ResourceEventHandlerFuncs) *Controller {
@@ -215,7 +207,7 @@ func LoadSecretManager(clientset *kubernetes.Clientset, queue workqueue.RateLimi
 			key, _ := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
 
 			klog.Info("Secret deleted ", " obj ", secret.ResourceVersion, " key ", key)
-            queue.Add("sandbox/nginx")
+			queue.Add("sandbox/nginx")
 		},
 	}
 
@@ -248,7 +240,15 @@ func main() {
 	// create the workqueue
 	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
 
-	secretManager := LoadSecretManager(clientset, queue)
+	getSecretNames := func(route *v1.Pod) sets.String {
+		result := sets.NewString()
+
+		result.Insert(route.Spec.Containers[0].Env[0].ValueFrom.SecretKeyRef.Name)
+		// Add route.spec.tls.certificateRef
+		return result
+	}
+	// secretManager := LoadSecretManager(clientset, queue)
+	secretManager := monitor.NewSecretMonitor(clientset, queue)
 
 	h := cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
@@ -260,7 +260,8 @@ func main() {
 				queue.Add(key)
 			}
 
-			secretManager.RegisterRoute(pod)
+			// secretManager.RegisterRoute(pod)
+			secretManager.Register(pod, getSecretNames)
 		},
 		UpdateFunc: func(old interface{}, new interface{}) {
 			key, err := cache.MetaNamespaceKeyFunc(new)
@@ -271,8 +272,11 @@ func main() {
 			if err == nil && !reflect.DeepEqual(oldPod.Spec.Containers, newPod.Spec.Containers) {
 				queue.Add(key)
 
-				secretManager.UnregisterRoute(oldPod)
-				secretManager.RegisterRoute(newPod)
+				// secretManager.UnregisterRoute(oldPod)
+				// secretManager.RegisterRoute(newPod)
+
+				secretManager.Unregister(oldPod, getSecretNames)
+				secretManager.Register(newPod, getSecretNames)
 			}
 		},
 		DeleteFunc: func(obj interface{}) {
@@ -285,7 +289,8 @@ func main() {
 			if err == nil {
 				queue.Add(key)
 			}
-			secretManager.UnregisterRoute(obj.(*v1.Pod))
+			// secretManager.UnregisterRoute(obj.(*v1.Pod))
+			secretManager.Unregister(obj.(*v1.Pod), getSecretNames)
 
 		},
 	}
