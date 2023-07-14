@@ -17,18 +17,16 @@ limitations under the License.
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"reflect"
-	"thejasn/watch-based-informer-playground/monitor"
+	"thejasn/watch-based-informer-playground/monitorv3"
 	"time"
 
 	"k8s.io/klog/v2"
 
 	v1 "k8s.io/api/core/v1"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -39,6 +37,9 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/workqueue"
+
+	routev1 "github.com/openshift/api/route/v1"
+	routev1client "github.com/openshift/client-go/route/clientset/versioned"
 )
 
 type listObjectFunc func(string, meta_v1.ListOptions) (runtime.Object, error)
@@ -155,65 +156,6 @@ func (c *Controller) runWorker() {
 	}
 }
 
-func LoadSecretManager(clientset *kubernetes.Clientset, queue workqueue.RateLimitingInterface) Manager {
-
-	listSecret := func(namespace string, opts metav1.ListOptions) (runtime.Object, error) {
-		return clientset.CoreV1().Secrets("sandbox").List(context.TODO(), opts)
-	}
-	watchSecret := func(namespace string, opts metav1.ListOptions) (watch.Interface, error) {
-		return clientset.CoreV1().Secrets(namespace).Watch(context.TODO(), opts)
-	}
-	newSecret := func() runtime.Object {
-		return &v1.Secret{}
-	}
-	isImmutable := func(object runtime.Object) bool {
-		if secret, ok := object.(*v1.Secret); ok {
-			return secret.Immutable != nil && *secret.Immutable
-		}
-		return false
-	}
-	gr := v1.Resource("secret")
-	getSecretNames := func(route *v1.Pod) sets.String {
-		result := sets.NewString()
-
-		result.Insert(route.Spec.Containers[0].Env[0].ValueFrom.SecretKeyRef.Name)
-		// Add route.spec.tls.certificateRef
-		return result
-	}
-	secreth := cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			key, _ := cache.MetaNamespaceKeyFunc(obj)
-
-			secret := obj.(*v1.Secret)
-			klog.Info("Secret added ", "obj ", secret.ResourceVersion, " key ", key)
-
-			queue.Add("sandbox/nginx")
-
-		},
-		UpdateFunc: func(old interface{}, new interface{}) {
-			key, _ := cache.MetaNamespaceKeyFunc(new)
-
-			secretOld := old.(*v1.Secret)
-			secretNew := new.(*v1.Secret)
-			klog.Info("Secret updated ", "old ", secretOld.ResourceVersion, " new ", secretNew.ResourceVersion, " key ", key)
-
-			queue.Add("sandbox/nginx")
-		},
-		DeleteFunc: func(obj interface{}) {
-
-			secret := obj.(*v1.Secret)
-			// IndexerInformer uses a delta queue, therefore for deletes we have to use this
-			// key function.
-			key, _ := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
-
-			klog.Info("Secret deleted ", " obj ", secret.ResourceVersion, " key ", key)
-			queue.Add("sandbox/nginx")
-		},
-	}
-
-	return NewWatchBasedManager(listSecret, watchSecret, newSecret, isImmutable, gr, 1*time.Second, secreth, getSecretNames)
-}
-
 func main() {
 	var kubeconfig string
 	var master string
@@ -235,67 +177,111 @@ func main() {
 	}
 
 	// create the pod watcher
-	podListWatcher := cache.NewListWatchFromClient(clientset.CoreV1().RESTClient(), "pods", "sandbox", fields.Everything())
+	podListWatcher := cache.NewListWatchFromClient(routev1client.NewForConfigOrDie(config).RouteV1().RESTClient(), "routes", "sandbox", fields.Everything())
 
 	// create the workqueue
 	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
 
-	getSecretNames := func(route *v1.Pod) sets.String {
+	getSecretNames := func(route *routev1.Route) sets.String {
 		result := sets.NewString()
 
-		result.Insert(route.Spec.Containers[0].Env[0].ValueFrom.SecretKeyRef.Name)
+		result.Insert(route.Spec.TLS.ExternalCertificate.Name)
+		klog.Info("")
 		// Add route.spec.tls.certificateRef
 		return result
 	}
 	// secretManager := LoadSecretManager(clientset, queue)
-	secretManager := monitor.NewSecretMonitor(clientset, queue)
+	// secretManager := monitor.NewSecretMonitor(clientset, queue)
+	// secretManager := monitorv2.NewSecretMonitor(clientset, queue)
+	secretManager := monitorv3.NewManager(clientset, queue)
+
+	secreth := cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			key, _ := cache.MetaNamespaceKeyFunc(obj)
+
+			secret := obj.(*v1.Secret)
+			klog.Info("Secret added ", "obj ", secret.ResourceVersion, " key ", key)
+
+			queue.Add("sandbox/route")
+
+		},
+		UpdateFunc: func(old interface{}, new interface{}) {
+			key, _ := cache.MetaNamespaceKeyFunc(new)
+
+			secretOld := old.(*v1.Secret)
+			secretNew := new.(*v1.Secret)
+			klog.Info("Secret updated ", "old ", secretOld.ResourceVersion, " new ", secretNew.ResourceVersion, " key ", key)
+
+			queue.Add("sandbox/route")
+		},
+		DeleteFunc: func(obj interface{}) {
+
+			secret := obj.(*v1.Secret)
+			// IndexerInformer uses a delta queue, therefore for deletes we have to use this
+			// key function.
+			key, _ := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
+
+			klog.Info("Secret deleted ", " obj ", secret.ResourceVersion, " key ", key)
+			queue.Add("sandbox/route")
+		},
+	}
+
+	secretManager.WithSecretHandler(secreth)
 
 	h := cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			key, err := cache.MetaNamespaceKeyFunc(obj)
+			key, _ := cache.MetaNamespaceKeyFunc(obj)
 
-			pod := obj.(*v1.Pod)
-			klog.Info("Add Event ", "pod.Name ", pod.Name, " key ", key)
-			if err == nil {
-				queue.Add(key)
-			}
-
+			route := obj.(*routev1.Route)
+			klog.Info("Add Event ", "pod.Name ", route.Name, " key ", key)
+			// if err == nil {
+			// 	queue.Add(key)
+			// }
+			//
 			// secretManager.RegisterRoute(pod)
-			secretManager.Register(pod, getSecretNames)
+			secretManager.RegisterRoute(route, getSecretNames)
 		},
 		UpdateFunc: func(old interface{}, new interface{}) {
 			key, err := cache.MetaNamespaceKeyFunc(new)
 
-			oldPod := old.(*v1.Pod)
-			newPod := new.(*v1.Pod)
-			klog.Info("Update controller ", "old ", oldPod.ResourceVersion, " new ", newPod.ResourceVersion, " key ", key)
-			if err == nil && !reflect.DeepEqual(oldPod.Spec.Containers, newPod.Spec.Containers) {
-				queue.Add(key)
+			oldRoute := old.(*routev1.Route)
+			newRoute := new.(*routev1.Route)
+			if err == nil && !reflect.DeepEqual(oldRoute.Spec, newRoute.Spec) {
+
+				klog.Info("Update controller ", "old ", oldRoute.ResourceVersion, " new ", newRoute.ResourceVersion, " key ", key)
+				// queue.Add(key)
 
 				// secretManager.UnregisterRoute(oldPod)
 				// secretManager.RegisterRoute(newPod)
 
-				secretManager.Unregister(oldPod, getSecretNames)
-				secretManager.Register(newPod, getSecretNames)
+				secretManager.UnregisterRoute(oldRoute, getSecretNames)
+				secretManager.RegisterRoute(newRoute, getSecretNames)
+			}
+
+			s, err := secretManager.GetSecret(newRoute, "", "")
+			if err == nil {
+				klog.Info("fetching secret", s.Data)
+			} else {
+				klog.Error(err)
 			}
 		},
 		DeleteFunc: func(obj interface{}) {
 			// IndexerInformer uses a delta queue, therefore for deletes we have to use this
 			// key function.
-			key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
+			key, _ := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
 
-			pod := obj.(*v1.Pod)
-			klog.Info("Delete controller ", " obj ", pod.ResourceVersion, " key ", key)
-			if err == nil {
-				queue.Add(key)
-			}
+			route := obj.(*routev1.Route)
+			klog.Info("Delete controller ", " obj ", route.ResourceVersion, " key ", key)
+			// if err == nil {
+			// 	queue.Add(key)
+			// }
 			// secretManager.UnregisterRoute(obj.(*v1.Pod))
-			secretManager.Unregister(obj.(*v1.Pod), getSecretNames)
+			secretManager.UnregisterRoute(route, getSecretNames)
 
 		},
 	}
 
-	indexer, informer := cache.NewIndexerInformer(podListWatcher, &v1.Pod{}, 0, h, cache.Indexers{})
+	indexer, informer := cache.NewIndexerInformer(podListWatcher, &routev1.Route{}, 0, h, cache.Indexers{})
 
 	controller := NewController(queue, indexer, informer, clientset, h)
 

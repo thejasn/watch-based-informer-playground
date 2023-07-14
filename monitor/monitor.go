@@ -3,11 +3,9 @@ package monitor
 import (
 	"sync"
 
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/klog/v2"
 )
 
 type objectKey struct {
@@ -16,30 +14,38 @@ type objectKey struct {
 	uid       types.UID
 }
 
-type ObjectMonitor struct {
-	refCount int
+type Object struct {
+	RefCount int
 	store    cache.Store
 	informer cache.Controller
 
-	hasSynced func() (bool, error)
+	HasSynced func() (bool, error)
 
 	// waitGroup is used to ensure that there won't be two concurrent calls to reflector.Run
 	waitGroup sync.WaitGroup
 
-	// lock is to ensure the access and modify of lastAccessTime, stopped, and immutable are thread safety,
-	// and protecting from closing stopCh multiple times.
 	lock    sync.Mutex
 	stopped bool
 	stopCh  chan struct{}
 }
 
-func (i *ObjectMonitor) stop() bool {
+func NewObject(informer cache.Controller, store cache.Store, hasSynced func() (bool, error), stopCh chan struct{}) *Object {
+	return &Object{
+		RefCount:  0,
+		informer:  informer,
+		store:     store,
+		HasSynced: hasSynced,
+		stopCh:    stopCh,
+	}
+}
+
+func (i *Object) Stop() bool {
 	i.lock.Lock()
 	defer i.lock.Unlock()
 	return i.stopThreadUnsafe()
 }
 
-func (i *ObjectMonitor) stopThreadUnsafe() bool {
+func (i *Object) stopThreadUnsafe() bool {
 	if i.stopped {
 		return false
 	}
@@ -48,37 +54,27 @@ func (i *ObjectMonitor) stopThreadUnsafe() bool {
 	return true
 }
 
+func (c *Object) IncrementRef() {
+	c.RefCount++
+}
+
+func (c *Object) GetByKey(name string) (interface{}, bool, error) {
+	return c.store.GetByKey(name)
+}
+
 // key returns key of an object with a given name and namespace.
 // This has to be in-sync with cache.MetaNamespaceKeyFunc.
-func (c *ObjectMonitor) key(namespace, name string) string {
+func (c *Object) Key(namespace, name string) string {
 	if len(namespace) > 0 {
 		return namespace + "/" + name
 	}
 	return name
 }
 
-func (i *ObjectMonitor) restartReflectorIfNeeded() {
-	i.lock.Lock()
-	defer i.lock.Unlock()
-	if !i.stopped {
-		return
-	}
-	i.stopCh = make(chan struct{})
-	i.stopped = false
-	go i.startInformer()
-}
-
-func (i *ObjectMonitor) startInformer() {
+func (i *Object) StartInformer() {
 	i.waitGroup.Wait()
 	i.waitGroup.Add(1)
 	defer i.waitGroup.Done()
+	klog.Info("starting informer")
 	i.informer.Run(i.stopCh)
-}
-
-type Manager interface {
-	Get(namespace, name string) (runtime.Object, error)
-
-	Register(parent *corev1.Pod, getReferencedObjects func(*corev1.Pod) sets.String)
-
-	Unregister(parent *corev1.Pod, getReferencedObjects func(*corev1.Pod) sets.String)
 }
