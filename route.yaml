@@ -1,0 +1,18 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: route-a
+  namespace: sandbox
+spec:
+  host: test-route.apps.thn-oc413-v23.devcluster.openshift.com
+  port:
+    targetPort: 8080
+  tls:
+    termination: Edge
+    externalCertificate:
+      name: dummy-secret
+  to:
+    kind: Service
+    name: dummy
+    weight: 100
+  wildcardPolicy: None
